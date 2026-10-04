@@ -1,14 +1,24 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { derived, get } from "svelte/store";
+  import { derived } from "svelte/store";
   import { createQuery } from "@tanstack/svelte-query";
   import { superForm } from "sveltekit-superforms";
   import { zod4 } from "sveltekit-superforms/adapters";
   import { z } from "zod";
   import * as m from "$lib/paraglide/messages.js";
   import { setLocale } from "$lib/paraglide/runtime.js";
-  import { activeCues, activeTrackId, conflicts, createSnapshot, cues, lockTerm, mergeNext, nudgeCue, resolveConflict, restoreSnapshot, reviewCue, reviewEvents, reviewer, selectedCueId, setCueStatus, snapshots, splitCue, terms, tracks, updateCue } from "$lib/stores/subtitles";
-  import type { Cue } from "$lib/stores/subtitles";
+  import {
+    activeCues, activeDeviceId, activeTrackId, addCue, createSnapshot, cues, deviceActor, deviceName,
+    ensureSeed, lastSyncReport, lockTerm, mergeNext, nudgeCue, online, outbox, pendingConflicts,
+    resolveConflict, restoreSnapshot, reviewCue, reviewEvents, selectedCueId,
+    setCueStatus, setOnline, snapshots, splitCue, syncMessage, syncNow, switchDevice, terms, tracks, updateCue
+  } from "$lib/stores/subtitles";
+  import type { Cue } from "$lib/sync/types";
+
+  const DEVICE_OPTIONS = [
+    { id: "dev-lin", name: "林岚的笔记本" },
+    { id: "dev-zhou", name: "周野的工位机" }
+  ];
 
   const cueSchema = z.object({ source: z.string().min(2), translated: z.string().min(2), start: z.coerce.number().min(0), duration: z.coerce.number().min(0.5).max(30) });
   const defaults = { source: "", translated: "", start: 0, duration: 2.5 };
@@ -16,16 +26,33 @@
     validators: zod4(cueSchema),
     onSubmit: async ({ formData }) => {
       const start = Number(formData.get("start") ?? 0);
-      const item: Cue = { id: crypto.randomUUID(), trackId: $activeTrackId, start, end: start + Number(formData.get("duration") ?? 2.5), source: String(formData.get("source") ?? ""), translated: String(formData.get("translated") ?? ""), status: "翻译中", translator: "当前译者", reviewerNote: "" };
-      cues.update((items) => [...items, item]);
-      selectedCueId.set(item.id);
+      addCue({
+        trackId: $activeTrackId,
+        start,
+        end: start + Number(formData.get("duration") ?? 2.5),
+        source: String(formData.get("source") ?? ""),
+        translated: String(formData.get("translated") ?? "")
+      });
     }
   });
-  const queryOptions = derived(activeTrackId, ($trackId) => ({ queryKey: ["cues", $trackId] as const, queryFn: async (): Promise<Cue[]> => get(activeCues) }));
+  const queryOptions = derived(activeTrackId, ($trackId) => ({ queryKey: ["cues", $trackId] as const, queryFn: async (): Promise<Cue[]> => $activeCues }));
   const query = createQuery(queryOptions);
-  const activeTrack = $derived($tracks.find((track) => track.id === $activeTrackId));
-  const selected = $derived($cues.find((cue) => cue.id === $selectedCueId));
   let reviewNote = $state("");
+
+  const selected = $derived($cues.find((cue) => cue.id === $selectedCueId));
+  const opLabel: Record<string, string> = {
+    "cue.add": "新增字幕",
+    "cue.edit": "编辑字幕",
+    "cue.split": "拆分",
+    "cue.merge": "合并",
+    "cue.status": "状态变更",
+    "review.approve": "审校通过",
+    "review.reject": "退回修改",
+    "term.lock": "术语锁定",
+    "term.edit": "术语编辑",
+    "conflict.resolve": "冲突裁定",
+    "baseline.import": "旧版数据迁移"
+  };
 
   function formatTime(value: number) {
     const minutes = Math.floor(value / 60);
@@ -35,6 +62,7 @@
   }
 
   onMount(() => {
+    ensureSeed();
     const handler = (event: KeyboardEvent) => {
       if ((event.target as HTMLElement)?.tagName === "TEXTAREA" || (event.target as HTMLElement)?.tagName === "INPUT") return;
       const list = $activeCues;
@@ -58,13 +86,32 @@
     <div class="keyboard"><b>键盘操作</b><span>J / K 选择字幕</span><span>S 拆分 · M 合并</span><span>⌘S 保存快照</span></div>
   </aside>
   <main>
-    <header><div><small>纪录片《潮汐线》 · 第 3 集</small><h1>{m.title()}</h1><p>多语种轨道、术语锁定与审校反馈在同一时间轴协作。</p></div><div class="header-actions"><select value={$activeTrackId} onchange={(event) => activeTrackId.set(event.currentTarget.value)}>{#each $tracks as track}<option value={track.id}>{track.name}</option>{/each}</select><button onclick={() => setLocale("en")}>EN</button><button onclick={() => setLocale("zh")}>中文</button></div></header>
+    <header><div><small>纪录片《潮汐线》 · 第 3 集</small><h1>{m.title()}</h1><p>断网也能拆合字幕、改时间码；每台设备的改动按序留凭据，回网逐条重放。</p></div><div class="header-actions"><select value={$activeTrackId} onchange={(event) => activeTrackId.set(event.currentTarget.value)}>{#each $tracks as track}<option value={track.id}>{track.name}</option>{/each}</select><button onclick={() => setLocale("en")}>EN</button><button onclick={() => setLocale("zh")}>中文</button></div></header>
 
-    <section class="metrics"><article><span>当前轨道</span><b>{activeTrack?.name}</b></article><article><span>字幕条数</span><b>{$activeCues.length}</b></article><article><span>待审</span><b>{$activeCues.filter((cue) => cue.status === "待审").length}</b></article><article><span>已锁定术语</span><b>{$terms.filter((term) => term.status === "已锁定").length}</b></article></section>
+    <section class="sync-bar panel">
+      <div class="sync-id">
+        <small>当前设备</small>
+        <select value={$activeDeviceId} onchange={(e) => switchDevice(e.currentTarget.value)}>
+          {#each DEVICE_OPTIONS as opt}<option value={opt.id}>{opt.name}</option>{/each}
+        </select>
+        <b>{$deviceName}</b><span class="actor">操作人 {$deviceActor}</span>
+      </div>
+      <div class="sync-net">
+        <span class={`net-dot {$online ? "on" : "off"}`}></span>
+        <b>{$online ? "已联网" : "断网中（改动只留在本机凭据）"}</b>
+        <button class="btn btn-sm" onclick={() => setOnline(!$online)}>{$online ? "模拟断网" : "恢复联网并重放"}</button>
+        <button class="btn btn-sm variant-filled-primary" disabled={$online} onclick={() => syncNow()}>立即同步</button>
+      </div>
+      <div class="sync-stat"><span>待重放凭据</span><b class={$outbox.length ? "warn" : ""}>{$outbox.length}</b></div>
+      <div class="sync-stat"><span>待判冲突</span><b class={$pendingConflicts.length ? "danger" : ""}>{$pendingConflicts.length}</b></div>
+      <div class="sync-msg">{$syncMessage || "在线状态下编辑会即时重放"}</div>
+    </section>
+
+    <section class="metrics"><article><span>当前轨道</span><b>{$tracks.find((t) => t.id === $activeTrackId)?.name}</b></article><article><span>字幕条数</span><b>{$activeCues.length}</b></article><article><span>待审</span><b>{$activeCues.filter((cue) => cue.status === "待审").length}</b></article><article><span>已锁定术语</span><b>{$terms.filter((term) => term.status === "已锁定").length}</b></article></section>
 
     <div class="editor-grid">
       <section class="panel timeline">
-        <div class="panel-head"><div><h2>时间轴</h2><small>拖动或点击选择，所有修改保存到浏览器本地</small></div><button class="btn variant-filled-primary" onclick={() => createSnapshot()}>保存快照</button></div>
+        <div class="panel-head"><div><h2>时间轴</h2><small>每次拆分/合并/改时间码都会先写成本机凭据，离线不丢、回网可重放</small></div><button class="btn variant-filled-primary" onclick={() => createSnapshot()}>保存快照</button></div>
         {#if $query.isPending}<p>正在加载字幕轨道…</p>{:else}
           <div class="cue-list">
             {#each $activeCues as cue}
@@ -93,17 +140,27 @@
         </section>
 
         <section class="panel">
-          <div class="panel-head"><h2>术语锁定</h2><small>锁定术语不会被普通翻译直接覆盖</small></div>
+          <div class="panel-head"><h2>术语锁定</h2><small>锁定后他机重放的改动会被拦截</small></div>
           {#each $terms as term}
             <div class="term"><span><b>{term.source}</b> → {term.target}</span><button class="btn btn-sm" disabled={term.status === "已锁定"} onclick={() => lockTerm(term.id)}>{term.status}</button></div>
           {/each}
         </section>
 
         <section class="panel">
-          <div class="panel-head"><h2>协作冲突</h2></div>
-          {#each $conflicts as conflict}
-            <article class="conflict"><b>{conflict.message}</b><p>协作版本：{formatTime(conflict.remoteStart)}–{formatTime(conflict.remoteEnd)}</p><div class="actions"><button class="btn btn-sm" disabled={conflict.status !== "待处理"} onclick={() => resolveConflict(conflict.id, "采用本地")}>保留本机</button><button class="btn btn-sm variant-filled-primary" disabled={conflict.status !== "待处理"} onclick={() => resolveConflict(conflict.id, "采用协作版本")}>采用协作版本</button><span class="chip">{conflict.status}</span></div></article>
-          {/each}
+          <div class="panel-head"><h2>冲突两版待判</h2><small>已通过结论不会被盖掉；两边都改过时两版都保留</small></div>
+          {#each $pendingConflicts as conflict}
+            <article class="conflict">
+              <b>{conflict.message}</b>
+              <div class="versions">
+                <div class="version-a"><small>A · {conflict.versions[0].label}（{conflict.versions[0].actor}）</small><p>{conflict.versions[0].cue.translated || "（无译文）"}</p><span class="chip">{conflict.versions[0].cue.status}</span></div>
+                <div class="version-b"><small>B · {conflict.versions[1].label}（{conflict.versions[1].actor}）</small><p>{conflict.versions[1].cue.translated || "（无译文）"}</p><span class="chip">{conflict.versions[1].cue.status}</span></div>
+              </div>
+              <div class="actions">
+                <button class="btn btn-sm" onclick={() => resolveConflict(conflict.id, "apply-a")}>保留 A（当前/已通过）</button>
+                <button class="btn btn-sm variant-filled-primary" onclick={() => resolveConflict(conflict.id, "apply-b")}>采用 B（来稿）</button>
+              </div>
+            </article>
+          {:else}<p class="muted">暂无待判冲突。</p>{/each}
         </section>
       </aside>
     </div>
@@ -119,8 +176,19 @@
           <button class="btn variant-filled-primary" type="submit">新增到当前轨道</button>
         </form>
       </section>
-      <section class="panel"><div class="panel-head"><h2>审校记录</h2></div><div class="events">{#each $reviewEvents as item}<article><b>{item.action}</b><p>{item.detail}</p><small>{item.actor} · {new Date(item.time).toLocaleTimeString("zh-CN")}</small></article>{/each}{#if !$reviewEvents.length}<p>暂无审校操作。</p>{/if}</div></section>
-      <section class="panel"><div class="panel-head"><h2>版本快照</h2></div><div class="events">{#each $snapshots as item}<article><b>{item.name}</b><p>{item.cues.length} 条字幕 · {new Date(item.time).toLocaleString("zh-CN")}</p><button class="btn btn-sm" onclick={() => restoreSnapshot(item.id)}>恢复</button></article>{/each}{#if !$snapshots.length}<p>使用 ⌘S 或顶部按钮创建快照。</p>{/if}</div></section>
+
+      <section class="panel">
+        <div class="panel-head"><h2>本机凭据发件箱（{$outbox.length}）</h2>{#if $lastSyncReport}<small>上轮：重放 {$lastSyncReport.pushed} · 重复 {$lastSyncReport.duplicate} · 拦截 {$lastSyncReport.blocked.length} · 待重试 {$lastSyncReport.retryPending.length}</small>{/if}</div>
+        <div class="events">
+          {#each $outbox as cred}
+            <article class="cred"><b>#{cred.seq} {opLabel[cred.op.type] ?? cred.op.type}</b><p>{cred.actor} · {new Date(cred.time).toLocaleTimeString("zh-CN")}</p></article>
+          {:else}<p class="muted">发件箱已空，所有改动都已留据回传。</p>{/each}
+        </div>
+      </section>
+
+      <section class="panel"><div class="panel-head"><h2>审校记录</h2></div><div class="events">{#each $reviewEvents as item}<article><b>{item.action}{item.legacy ? "（旧版迁移）" : ""}</b><p>{item.detail}</p><small>{item.actor} · {new Date(item.time).toLocaleTimeString("zh-CN")}</small></article>{/each}{#if !$reviewEvents.length}<p>暂无审校操作。</p>{/if}</div></section>
     </div>
+
+    <section class="panel" style="margin-top:18px"><div class="panel-head"><h2>版本快照</h2></div><div class="events snap-row">{#each $snapshots as item}<article><b>{item.name}</b><p>{item.cues.length} 条字幕 · {new Date(item.time).toLocaleString("zh-CN")}</p><button class="btn btn-sm" onclick={() => restoreSnapshot(item.id)}>恢复（按凭据回放）</button></article>{/each}{#if !$snapshots.length}<p>使用 ⌘S 或顶部按钮创建快照。</p>{/if}</div></section>
   </main>
 </div>

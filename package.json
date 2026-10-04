@@ -7,7 +7,8 @@
     "dev": "vite dev --host 0.0.0.0 --port 62016",
     "build": "vite build",
     "preview": "vite preview --host 0.0.0.0 --port 62016",
-    "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json"
+    "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
+    "test": "tsx --test test/*.test.ts"
   },
   "dependencies": {
     "@inlang/paraglide-js": "^2.25.4",
@@ -21,9 +22,11 @@
     "@sveltejs/kit": "^2.70.3",
     "@sveltejs/vite-plugin-svelte": "^6.2.4",
     "@tailwindcss/vite": "^4.1.14",
+    "@types/node": "^26.6.4",
     "svelte": "^5.57.1",
     "svelte-check": "^4.3.2",
     "tailwindcss": "^4.1.14",
+    "tsx": "^4.23.15",
     "typescript": "^5.9.2",
     "vite": "^7.1.7"
   }
