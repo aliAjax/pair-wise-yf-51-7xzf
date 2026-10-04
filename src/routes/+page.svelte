@@ -7,8 +7,9 @@
   import { z } from "zod";
   import * as m from "$lib/paraglide/messages.js";
   import { setLocale } from "$lib/paraglide/runtime.js";
-  import { activeCues, activeTrackId, conflicts, createSnapshot, cues, lockTerm, mergeNext, nudgeCue, resolveConflict, restoreSnapshot, reviewCue, reviewEvents, reviewer, selectedCueId, setCueStatus, snapshots, splitCue, terms, tracks, updateCue } from "$lib/stores/subtitles";
+  import { activeCues, activeTrackId, createSnapshot, cues, lockTerm, mergeNext, nudgeCue, restoreSnapshot, reviewCue, reviewEvents, reviewer, selectedCueId, setCueStatus, snapshots, splitCue, terms, tracks, updateCue } from "$lib/stores/subtitles";
   import type { Cue } from "$lib/stores/subtitles";
+  import { appliedCredentialIds, conflicts, deviceId, online, outbox, replay, resolveConflict, simulateCollaboratorEdit, syncing, syncMessage } from "$lib/stores/sync";
 
   const cueSchema = z.object({ source: z.string().min(2), translated: z.string().min(2), start: z.coerce.number().min(0), duration: z.coerce.number().min(0.5).max(30) });
   const defaults = { source: "", translated: "", start: 0, duration: 2.5 };
@@ -26,12 +27,23 @@
   const activeTrack = $derived($tracks.find((track) => track.id === $activeTrackId));
   const selected = $derived($cues.find((cue) => cue.id === $selectedCueId));
   let reviewNote = $state("");
+  const pendingCount = $derived($outbox.filter((c) => c.state === "pending").length);
+  const conflictCount = $derived($conflicts.filter((c) => c.status === "待处理").length);
+  function toggleOnline() {
+    online.update((o) => !o);
+  }
 
   function formatTime(value: number) {
     const minutes = Math.floor(value / 60);
     const seconds = Math.floor(value % 60);
     const tenths = Math.floor((value % 1) * 10);
     return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}.${tenths}`;
+  }
+
+  function stringify(value: unknown): string {
+    if (value === null || value === undefined) return "—";
+    if (typeof value === "object") return JSON.stringify(value);
+    return String(value);
   }
 
   onMount(() => {
@@ -58,7 +70,15 @@
     <div class="keyboard"><b>键盘操作</b><span>J / K 选择字幕</span><span>S 拆分 · M 合并</span><span>⌘S 保存快照</span></div>
   </aside>
   <main>
-    <header><div><small>纪录片《潮汐线》 · 第 3 集</small><h1>{m.title()}</h1><p>多语种轨道、术语锁定与审校反馈在同一时间轴协作。</p></div><div class="header-actions"><select value={$activeTrackId} onchange={(event) => activeTrackId.set(event.currentTarget.value)}>{#each $tracks as track}<option value={track.id}>{track.name}</option>{/each}</select><button onclick={() => setLocale("en")}>EN</button><button onclick={() => setLocale("zh")}>中文</button></div></header>
+    <header><div><small>纪录片《潮汐线》 · 第 3 集</small><h1>{m.title()}</h1><p>多语种轨道、术语锁定与审校反馈在同一时间轴协作。</p></div><div class="header-actions">
+  <span class={`chip ${$online ? "在线" : "离线"}`}>{$online ? "● 在线" : "○ 离线"}</span>
+  <button class="btn btn-sm" onclick={toggleOnline}>{$online ? "切到离线" : "切到在线"}</button>
+  <button class="btn btn-sm variant-filled-primary" onclick={() => replay()} disabled={$syncing || !$online}>{$syncing ? "重放中…" : "联网重放"}</button>
+  <button class="btn btn-sm" onclick={simulateCollaboratorEdit} disabled={!$online}>模拟协作者改动</button>
+  <select value={$activeTrackId} onchange={(event) => activeTrackId.set(event.currentTarget.value)}>{#each $tracks as track}<option value={track.id}>{track.name}</option>{/each}</select>
+  <button onclick={() => setLocale("en")}>EN</button>
+  <button onclick={() => setLocale("zh")}>中文</button>
+</div></header>
 
     <section class="metrics"><article><span>当前轨道</span><b>{activeTrack?.name}</b></article><article><span>字幕条数</span><b>{$activeCues.length}</b></article><article><span>待审</span><b>{$activeCues.filter((cue) => cue.status === "待审").length}</b></article><article><span>已锁定术语</span><b>{$terms.filter((term) => term.status === "已锁定").length}</b></article></section>
 
@@ -100,10 +120,23 @@
         </section>
 
         <section class="panel">
-          <div class="panel-head"><h2>协作冲突</h2></div>
+          <div class="panel-head"><h2>协作冲突</h2>{#if conflictCount}<span class="chip 待处理">{conflictCount} 条待判</span>{/if}</div>
           {#each $conflicts as conflict}
-            <article class="conflict"><b>{conflict.message}</b><p>协作版本：{formatTime(conflict.remoteStart)}–{formatTime(conflict.remoteEnd)}</p><div class="actions"><button class="btn btn-sm" disabled={conflict.status !== "待处理"} onclick={() => resolveConflict(conflict.id, "采用本地")}>保留本机</button><button class="btn btn-sm variant-filled-primary" disabled={conflict.status !== "待处理"} onclick={() => resolveConflict(conflict.id, "采用协作版本")}>采用协作版本</button><span class="chip">{conflict.status}</span></div></article>
+            <article class="conflict">
+              <b>{conflict.message}</b>
+              <p class="conflict-meta">凭据 {conflict.deviceId} · #{conflict.seq} · {conflict.op}{#if conflict.field !== "结构" && conflict.field !== "id"} · 字段 {conflict.field}{/if}</p>
+              <div class="conflict-versions">
+                <div class="version"><small>本机版本</small><code>{stringify(conflict.localValue)}</code></div>
+                <div class="version"><small>协作版本</small><code>{stringify(conflict.remoteValue)}</code></div>
+              </div>
+              <div class="actions">
+                <button class="btn btn-sm" disabled={conflict.status !== "待处理"} onclick={() => resolveConflict(conflict.id, "采用本机")}>保留本机</button>
+                <button class="btn btn-sm variant-filled-primary" disabled={conflict.status !== "待处理"} onclick={() => resolveConflict(conflict.id, "采用协作版本")}>采用协作版本</button>
+                <span class="chip">{conflict.status}</span>
+              </div>
+            </article>
           {/each}
+          {#if !$conflicts.length}<p class="empty">两边改动一致或仅有一方改动时不会产生冲突。</p>{/if}
         </section>
       </aside>
     </div>
@@ -121,6 +154,21 @@
       </section>
       <section class="panel"><div class="panel-head"><h2>审校记录</h2></div><div class="events">{#each $reviewEvents as item}<article><b>{item.action}</b><p>{item.detail}</p><small>{item.actor} · {new Date(item.time).toLocaleTimeString("zh-CN")}</small></article>{/each}{#if !$reviewEvents.length}<p>暂无审校操作。</p>{/if}</div></section>
       <section class="panel"><div class="panel-head"><h2>版本快照</h2></div><div class="events">{#each $snapshots as item}<article><b>{item.name}</b><p>{item.cues.length} 条字幕 · {new Date(item.time).toLocaleString("zh-CN")}</p><button class="btn btn-sm" onclick={() => restoreSnapshot(item.id)}>恢复</button></article>{/each}{#if !$snapshots.length}<p>使用 ⌘S 或顶部按钮创建快照。</p>{/if}</div></section>
+      <section class="panel">
+        <div class="panel-head"><h2>凭据队列</h2>{#if pendingCount}<span class="chip 待审">{pendingCount} 条待重放</span>{/if}</div>
+        {#if $syncMessage}<p class="sync-message">{$syncMessage}</p>{/if}
+        <div class="events">
+          {#each $outbox as cred}
+            <article>
+              <b>{cred.op} · #{cred.seq}</b>
+              <p>目标 {cred.targetId}{#if cred.retargetedFrom}（按时间找回，原 {cred.retargetedFrom}）{/if}</p>
+              <small>{cred.deviceId} · {new Date(cred.createdAt).toLocaleTimeString("zh-CN")} · 尝试 {cred.attempts} 次</small>
+              <span class={`chip ${cred.state}`}>{cred.state}</span>
+            </article>
+          {/each}
+          {#if !$outbox.length}<p>离线或在线的每条改动都会生成有序凭据，联网后逐条重放。</p>{/if}
+        </div>
+      </section>
     </div>
   </main>
 </div>

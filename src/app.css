@@ -59,6 +59,19 @@ header p, header small { color: #697880; margin: 0; }
 .term { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #e4eaeb; padding: 9px 0; }
 .conflict { border: 1px solid #f0c98a; background: #fff9ef; border-radius: 9px; padding: 10px; margin-bottom: 8px; }
 .conflict p { margin: 6px 0; color: #6f685a; }
+.conflict-meta { font-size: 12px; color: #8a7d66 !important; }
+.conflict-versions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin: 8px 0; }
+.conflict-versions .version { background: #fff; border: 1px solid #ecd9b0; border-radius: 7px; padding: 7px; display: grid; gap: 4px; }
+.conflict-versions small { color: #8a7d66; font-size: 11px; }
+.conflict-versions code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; color: #4a5a60; word-break: break-all; }
+.sync-message { color: #146f68; font-size: 13px; margin: 0 0 8px; }
+.empty { color: #849097; font-size: 13px; }
+.chip.在线 { background: #def5ee; color: #0f735f; }
+.chip.离线 { background: #fde5e5; color: #a43838; }
+.chip.applied { background: #def5ee; color: #0f735f; }
+.chip.pending { background: #e8eef0; color: #5a6b72; }
+.chip.conflict { background: #fde5e5; color: #a43838; }
+.chip.skipped { background: #eef1f2; color: #8a979d; }
 .bottom-grid { display: grid; grid-template-columns: 1.2fr 1fr 1fr; gap: 18px; margin-top: 18px; }
 .cue-form { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
 .cue-form .label:first-child, .cue-form .label:nth-child(2) { grid-column: span 1; }
